@@ -12,6 +12,7 @@ import (
 type importValues struct {
 	RelativeImportBase string
 	Path               string
+	TypeMap            map[string]struct{}
 	Types              []string
 }
 
@@ -225,10 +226,14 @@ func (pf *protoFile) AddImport(imprt *descriptor.FileDescriptorProto, name strin
 		iv = &importValues{
 			RelativeImportBase: pf.RelativeImportBase,
 			Path:               tsImportPath(imprt),
+			TypeMap:            make(map[string]struct{}),
 		}
 		pf.Imports[imprt.GetPackage()] = iv
 	}
-	iv.Types = append(iv.Types, name)
+	if _, ok := iv.TypeMap[name]; !ok {
+		iv.TypeMap[name] = struct{}{}
+		iv.Types = append(iv.Types, name)
+	}
 }
 
 var protoTemplate = `

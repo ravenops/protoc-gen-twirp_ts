@@ -63,8 +63,30 @@ func generate(req *plugin.CodeGeneratorRequest) (*plugin.CodeGeneratorResponse, 
 		}
 
 		// Add messages
-		for _, message := range file.GetMessageType() {
-			name := message.GetName()
+		type collectMsg struct {
+			Name string
+			FD   *descriptor.DescriptorProto
+		}
+		var allMsgs []collectMsg
+		// Recurse through message definitions first
+		var collectMsgDefs func(msg *descriptor.DescriptorProto, parents []string)
+		collectMsgDefs = func(msg *descriptor.DescriptorProto, parents []string) {
+			parents = append(parents, msg.GetName())
+			allMsgs = append(allMsgs, collectMsg{
+				Name: strings.Join(parents, "_"),
+				FD:   msg,
+			})
+			for _, m := range msg.GetNestedType() {
+				collectMsgDefs(m, parents)
+			}
+		}
+		for _, msg := range file.GetMessageType() {
+			collectMsgDefs(msg, nil)
+		}
+		// Parse them all in flattened form and add to the list
+		for _, collect := range allMsgs {
+			message := collect.FD
+			name := collect.Name
 			tsInterface := typeToInterface(name)
 			jsonInterface := typeToJSONInterface(name)
 
@@ -80,12 +102,6 @@ func generate(req *plugin.CodeGeneratorRequest) (*plugin.CodeGeneratorResponse, 
 				Fields:      []*fieldValues{},
 				NestedTypes: []*messageValues{},
 				NestedEnums: []*enumValues{},
-			}
-
-			if len(message.GetNestedType()) > 0 {
-				// TODO: add support for nested messages
-				// https://developers.google.com/protocol-buffers/docs/proto#nested
-				log.Printf("warning: nested messages are not supported yet")
 			}
 
 			// Add nested enums
