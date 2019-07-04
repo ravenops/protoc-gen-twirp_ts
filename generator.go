@@ -10,11 +10,8 @@ import (
 	plugin "github.com/golang/protobuf/protoc-gen-go/plugin"
 )
 
-func samePackage(a *descriptor.FileDescriptorProto, b *descriptor.FileDescriptorProto) bool {
-	if a.GetPackage() != b.GetPackage() {
-		return false
-	}
-	return true
+func sameFile(a *descriptor.FileDescriptorProto, b *descriptor.FileDescriptorProto) bool {
+	return a.GetName() == b.GetName()
 }
 
 func fullTypeName(fd *descriptor.FileDescriptorProto, typeName string) string {
@@ -113,7 +110,7 @@ func generate(req *plugin.CodeGeneratorRequest) (*plugin.CodeGeneratorResponse, 
 				typeName := resolver.TypeName(file, singularFieldType(message, field))
 				fp, err := resolver.Resolve(field.GetTypeName())
 				if err == nil {
-					if !samePackage(fp, file) {
+					if !sameFile(fp, file) {
 						pfile.AddImport(fp, typeName)
 					}
 				}
@@ -148,7 +145,7 @@ func generate(req *plugin.CodeGeneratorRequest) (*plugin.CodeGeneratorResponse, 
 				{
 					fp, err := resolver.Resolve(method.GetInputType())
 					if err == nil {
-						if !samePackage(fp, file) {
+						if !sameFile(fp, file) {
 							pfile.AddImport(fp, inputType)
 						}
 					}
@@ -157,7 +154,7 @@ func generate(req *plugin.CodeGeneratorRequest) (*plugin.CodeGeneratorResponse, 
 				{
 					fp, err := resolver.Resolve(method.GetOutputType())
 					if err == nil {
-						if !samePackage(fp, file) {
+						if !sameFile(fp, file) {
 							pfile.AddImport(fp, outputType)
 						}
 					}
