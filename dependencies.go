@@ -34,7 +34,7 @@ func (d *dependencyResolver) Resolve(typeName string) (*descriptor.FileDescripto
 func (d *dependencyResolver) TypeName(fd *descriptor.FileDescriptorProto, typeName string) string {
 	orig, err := d.Resolve(fullTypeName(fd, typeName))
 	if err == nil {
-		if !samePackage(fd, orig) {
+		if fd.GetPackage() != orig.GetPackage() {
 			return importName(orig) + "." + typeName
 		}
 	}

@@ -10,49 +10,8 @@ import (
 	plugin "github.com/golang/protobuf/protoc-gen-go/plugin"
 )
 
-type packageFile struct {
-	name string
-	pf   []*protoFile
-}
-
-func (f *packageFile) addProto(pf *protoFile) {
-	f.pf = append(f.pf, pf)
-}
-
-func (f *packageFile) protoFile() *protoFile {
-	pf := &protoFile{
-		Imports:  map[string]*importValues{},
-		Messages: []*messageValues{},
-		Services: []*serviceValues{},
-		Enums:    []*enumValues{},
-	}
-	for i := range f.pf {
-		for j := range f.pf[i].Imports {
-			pf.Imports[j] = f.pf[i].Imports[j]
-		}
-		pf.Messages = append(pf.Messages, f.pf[i].Messages...)
-		pf.Services = append(pf.Services, f.pf[i].Services...)
-		pf.Enums = append(pf.Enums, f.pf[i].Enums...)
-	}
-	return pf
-}
-
-var (
-	packageFiles = map[string]*packageFile{}
-)
-
-func addProtoToPackage(fileName string, pf *protoFile) {
-	if _, ok := packageFiles[fileName]; !ok {
-		packageFiles[fileName] = &packageFile{name: fileName}
-	}
-	packageFiles[fileName].addProto(pf)
-}
-
-func samePackage(a *descriptor.FileDescriptorProto, b *descriptor.FileDescriptorProto) bool {
-	if a.GetPackage() != b.GetPackage() {
-		return false
-	}
-	return true
+func sameFile(a *descriptor.FileDescriptorProto, b *descriptor.FileDescriptorProto) bool {
+	return a.GetName() == b.GetName()
 }
 
 func fullTypeName(fd *descriptor.FileDescriptorProto, typeName string) string {
@@ -71,16 +30,18 @@ func generate(req *plugin.CodeGeneratorRequest) (*plugin.CodeGeneratorResponse, 
 		},
 	}
 
+	outputFiles := make(map[string][]*protoFile)
 	protoFiles := req.GetProtoFile()
-	for i := range protoFiles {
-		file := protoFiles[i]
-
+	for _, file := range protoFiles {
 		pfile := &protoFile{
-			Imports:  map[string]*importValues{},
-			Messages: []*messageValues{},
-			Services: []*serviceValues{},
-			Enums:    []*enumValues{},
+			Output:             tsFileName(file),
+			RelativeImportBase: relativeImportBase(file),
+			Imports:            map[string]*importValues{},
+			Messages:           []*messageValues{},
+			Services:           []*serviceValues{},
+			Enums:              []*enumValues{},
 		}
+		outputFiles[tsImportPath(file)] = append(outputFiles[tsImportPath(file)], pfile)
 
 		// Add enum
 		for _, enum := range file.GetEnumType() {
@@ -102,8 +63,30 @@ func generate(req *plugin.CodeGeneratorRequest) (*plugin.CodeGeneratorResponse, 
 		}
 
 		// Add messages
-		for _, message := range file.GetMessageType() {
-			name := message.GetName()
+		type collectMsg struct {
+			Name string
+			FD   *descriptor.DescriptorProto
+		}
+		var allMsgs []collectMsg
+		// Recurse through message definitions first
+		var collectMsgDefs func(msg *descriptor.DescriptorProto, parents []string)
+		collectMsgDefs = func(msg *descriptor.DescriptorProto, parents []string) {
+			parents = append(parents, msg.GetName())
+			allMsgs = append(allMsgs, collectMsg{
+				Name: strings.Join(parents, "_"),
+				FD:   msg,
+			})
+			for _, m := range msg.GetNestedType() {
+				collectMsgDefs(m, parents)
+			}
+		}
+		for _, msg := range file.GetMessageType() {
+			collectMsgDefs(msg, nil)
+		}
+		// Parse them all in flattened form and add to the list
+		for _, collect := range allMsgs {
+			message := collect.FD
+			name := collect.Name
 			tsInterface := typeToInterface(name)
 			jsonInterface := typeToJSONInterface(name)
 
@@ -119,12 +102,6 @@ func generate(req *plugin.CodeGeneratorRequest) (*plugin.CodeGeneratorResponse, 
 				Fields:      []*fieldValues{},
 				NestedTypes: []*messageValues{},
 				NestedEnums: []*enumValues{},
-			}
-
-			if len(message.GetNestedType()) > 0 {
-				// TODO: add support for nested messages
-				// https://developers.google.com/protocol-buffers/docs/proto#nested
-				log.Printf("warning: nested messages are not supported yet")
 			}
 
 			// Add nested enums
@@ -146,17 +123,13 @@ func generate(req *plugin.CodeGeneratorRequest) (*plugin.CodeGeneratorResponse, 
 
 			// Add message fields
 			for _, field := range message.GetField() {
+				typeName := resolver.TypeName(file, singularFieldType(message, field))
 				fp, err := resolver.Resolve(field.GetTypeName())
 				if err == nil {
-					if !samePackage(fp, file) {
-						pfile.Imports[fp.GetPackage()] = &importValues{
-							Name: importName(fp),
-							Path: importPath(file, fp.GetPackage()),
-						}
+					if !sameFile(fp, file) {
+						pfile.AddImport(fp, typeName)
 					}
 				}
-
-				typeName := resolver.TypeName(file, singularFieldType(message, field))
 
 				v.Fields = append(v.Fields, &fieldValues{
 					Name:  field.GetName(),
@@ -183,14 +156,13 @@ func generate(req *plugin.CodeGeneratorRequest) (*plugin.CodeGeneratorResponse, 
 			}
 
 			for _, method := range service.GetMethod() {
+				inputType := resolver.TypeName(file, removePkg(method.GetInputType()))
+				outputType := resolver.TypeName(file, removePkg(method.GetOutputType()))
 				{
 					fp, err := resolver.Resolve(method.GetInputType())
 					if err == nil {
-						if !samePackage(fp, file) {
-							pfile.Imports[fp.GetPackage()] = &importValues{
-								Name: importName(fp),
-								Path: importPath(file, fp.GetPackage()),
-							}
+						if !sameFile(fp, file) {
+							pfile.AddImport(fp, inputType)
 						}
 					}
 				}
@@ -198,41 +170,50 @@ func generate(req *plugin.CodeGeneratorRequest) (*plugin.CodeGeneratorResponse, 
 				{
 					fp, err := resolver.Resolve(method.GetOutputType())
 					if err == nil {
-						if !samePackage(fp, file) {
-							pfile.Imports[fp.GetPackage()] = &importValues{
-								Name: importName(fp),
-								Path: importPath(file, fp.GetPackage()),
-							}
+						if !sameFile(fp, file) {
+							pfile.AddImport(fp, outputType)
 						}
 					}
 				}
 
 				v.Methods = append(v.Methods, &serviceMethodValues{
 					Name:       method.GetName(),
-					InputType:  resolver.TypeName(file, removePkg(method.GetInputType())),
-					OutputType: resolver.TypeName(file, removePkg(method.GetOutputType())),
+					InputType:  inputType,
+					OutputType: outputType,
 				})
 			}
 
 			pfile.Services = append(pfile.Services, v)
 		}
-
-		// Add to appropriate file
-		addProtoToPackage(tsFileName(file), pfile)
 	}
 
-	for packageName := range packageFiles {
-		pf := packageFiles[packageName]
+	for tsPath, pff := range outputFiles {
+		ev := &exportValues{}
 
-		// Compile to typescript
-		content, err := pf.protoFile().Compile()
+		for _, pf := range pff {
+			ev.Exports = append(ev.Exports, strings.TrimSuffix(path.Base(pf.Output), ".ts"))
+
+			// Compile to typescript
+			content, err := pf.Compile()
+			if err != nil {
+				log.Fatal("could not compile template: ", err)
+			}
+
+			// Add to file list
+			res.File = append(res.File, &plugin.CodeGeneratorResponse_File{
+				Name:    &pf.Output,
+				Content: &content,
+			})
+		}
+
+		content, err := ev.Compile()
 		if err != nil {
 			log.Fatal("could not compile template: ", err)
 		}
 
-		// Add to file list
+		name := path.Join(tsPath, "index.ts")
 		res.File = append(res.File, &plugin.CodeGeneratorResponse_File{
-			Name:    &pf.name,
+			Name:    &name,
 			Content: &content,
 		})
 	}
@@ -281,24 +262,17 @@ func tsImportName(name string) string {
 	return base[0 : len(base)-len(path.Ext(base))]
 }
 
-func tsImportPath(name string) string {
-	base := path.Base(name)
-	name = name[0 : len(name)-len(path.Ext(base))]
-	return name
+func tsImportPath(fd *descriptor.FileDescriptorProto) string {
+	return path.Join(strings.Split(fd.GetPackage(), ".")...)
 }
 
-func importPath(fd *descriptor.FileDescriptorProto, name string) string {
-	// TODO: how to resolve relative paths?
-	return tsImportPath(name)
+func relativeImportBase(fd *descriptor.FileDescriptorProto) string {
+	return strings.Repeat("../", len(strings.Split(tsImportPath(fd), "/")))
 }
 
 func tsFileName(fd *descriptor.FileDescriptorProto) string {
-	packageName := fd.GetPackage()
-	if packageName == "" {
-		packageName = path.Base(fd.GetName())
-	}
-	name := path.Join(path.Dir(fd.GetName()), packageName)
-	return tsImportPath(name) + ".ts"
+	filename := strings.TrimSuffix(path.Base(fd.GetName()), path.Ext(fd.GetName())) + ".ts"
+	return path.Join(tsImportPath(fd), filename)
 }
 
 func singularFieldType(m *descriptor.DescriptorProto, f *descriptor.FieldDescriptorProto) string {

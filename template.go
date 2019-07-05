@@ -5,17 +5,22 @@ import (
 	"fmt"
 	"strings"
 	"text/template"
+
+	"github.com/golang/protobuf/protoc-gen-go/descriptor"
 )
 
 type importValues struct {
-	Name string
-	Path string
+	RelativeImportBase string
+	Path               string
+	TypeMap            map[string]struct{}
+	Types              []string
 }
 
 const importTemplate = `
-{{if ne .Name "timestamp" -}}
-import * as {{.Name}} from './{{.Path}}'
-{{end}}
+import { {{range $i, $t := .Types -}}
+  {{- if $i}}, {{end -}}
+  {{- $t -}}
+{{- end}} } from "{{.RelativeImportBase}}{{.Path}}";
 `
 
 func (iv *importValues) Compile() (string, error) {
@@ -37,7 +42,7 @@ const enumTemplate = `
 export enum {{$enumName}} {
   {{- range $i, $v := .Values}}
   {{- if $i}},{{end}}
-  {{$v.Name}} = '{{$v.Name}}'
+  {{$v.Name}} = "{{$v.Name}}"
   {{- end}}
 }
 `
@@ -60,10 +65,11 @@ var messageTemplate = `
 export interface {{.Interface}} {
   {{- if .Fields }}
   {{- range .Fields}}
-  {{.Field }}?: {{. | fieldType}}
+  {{.Field }}?: {{. | fieldType}};
   {{- end}}
-  {{end}}
-  toJSON?(): object
+  {{- end}}
+
+  toJSON?(): object;
 }
 
 {{- if .NestedEnums}}
@@ -76,23 +82,24 @@ export interface {{.Interface}} {
 
 export interface {{.JSONInterface}} {
   {{- range $i, $v := .Fields}}
-  {{$v.Name}}?: {{ $v | fieldType }}
+  {{$v.Name}}?: {{ $v | fieldType }};
   {{- end}}
-  toJSON?(): object
+  toJSON?(): object;
 }
 
 export class {{.Name}} implements {{.Interface}} {
-  private _json: {{.JSONInterface}}
+  private _json: {{.JSONInterface}};
 
   constructor(m?: {{.Interface}}) {
-    this._json = {}
+    this._json = {};
     if (m) {
       {{- range .Fields}}
-      this._json['{{.Name}}'] = m.{{.Field}}
+      this._json["{{.Name}}"] = m.{{.Field}};
       {{- end}}
     }
   }
-  {{range .Fields}}
+  {{- range .Fields}}
+
   // {{.Field}} ({{.Name}})
   public get {{.Field}}(): {{. | fieldType}} {
     {{if .IsEnum -}}
@@ -100,23 +107,25 @@ export class {{.Name}} implements {{.Interface}} {
     {{- else if .IsRepeated -}}
       return this._json.{{.Name}} || []
     {{- else -}}
-      return this._json.{{.Name}}!{{end}}
+      return this._json.{{.Name}}!
+    {{- end}};
   }
   public set {{.Field}}(value: {{. | fieldType}}) {
-    this._json.{{.Name}} = value
+    this._json.{{.Name}} = value;
   }
-  {{end}}
+  {{- end}}
+
   static fromJSON(m: {{.JSONInterface}} = {}): {{.Name}} {
     return new {{.Name}}({
     {{range $i, $v := .Fields -}}
       {{- if $i}},
       {{else}}  {{end}}{{$v.Field}}: {{ $v | objectToField -}}
     {{- end}}
-    })
+    });
   }
 
   public toJSON(): object {
-    return this._json
+    return this._json;
   }
 }
 `
@@ -143,37 +152,46 @@ type serviceValues struct {
 var serviceTemplate = `
 export interface {{.Interface}} {
   {{- range .Methods}}
-  {{.Name | methodName}}: (data: {{.InputType}}, headers?: object) => Promise<{{.OutputType}}>
+  {{.Name | methodName}}: (
+    data: {{.InputType}},
+    headers?: object
+  ) => Promise<{{.OutputType}}>;
   {{- end}}
 }
 
 export class {{.Name}} implements {{.Interface}} {
-  private hostname: string
-  private fetch: Fetch
-  private path = '/twirp/{{.Package}}.{{.Name}}/'
+  private hostname: string;
+  private fetch: Fetch;
+  private path = "/twirp/{{.Package}}.{{.Name}}/";
 
   constructor(hostname: string, fetch: Fetch) {
-    this.hostname = hostname
-    this.fetch = fetch
+    this.hostname = hostname;
+    this.fetch = fetch;
   }
 
   private url(name: string): string {
-    return this.hostname + this.path + name
+    return this.hostname + this.path + name;
   }
 
-  {{range .Methods}}
-  public {{.Name | methodName}}(params: {{.InputType}}, headers: object = {}): Promise<{{.OutputType}}> {
+  {{- range .Methods}}
+
+  public {{.Name | methodName}}(
+    params: {{.InputType}},
+    headers: object = {}
+  ): Promise<{{.OutputType}}> {
     return this.fetch(
-      this.url('{{.Name}}'),
+      this.url("{{.Name}}"),
       createTwirpRequest(params, headers)
-    ).then((res) => {
+    ).then(res => {
       if (!res.ok) {
-        return throwTwirpError(res)
+        return throwTwirpError(res);
       }
-      return res.json().then((m) => { return {{.OutputType}}.fromJSON(m)})
-    })
+      return res.json().then(m => {
+        return {{.OutputType}}.fromJSON(m);
+      });
+    });
   }
-  {{end}}
+  {{- end}}
 }
 `
 
@@ -190,48 +208,64 @@ type serviceMethodValues struct {
 }
 
 type protoFile struct {
-	Messages []*messageValues
-	Services []*serviceValues
-	Enums    []*enumValues
-	Imports  map[string]*importValues
+	Output             string
+	RelativeImportBase string
+	Messages           []*messageValues
+	Services           []*serviceValues
+	Enums              []*enumValues
+	Imports            map[string]*importValues
+}
+
+func (pf *protoFile) AddImport(imprt *descriptor.FileDescriptorProto, name string) {
+	if importName(imprt) == "timestamp" {
+		return
+	}
+
+	iv, ok := pf.Imports[imprt.GetPackage()]
+	if !ok {
+		iv = &importValues{
+			RelativeImportBase: pf.RelativeImportBase,
+			Path:               tsImportPath(imprt),
+			TypeMap:            make(map[string]struct{}),
+		}
+		pf.Imports[imprt.GetPackage()] = iv
+	}
+	if _, ok := iv.TypeMap[name]; !ok {
+		iv.TypeMap[name] = struct{}{}
+		iv.Types = append(iv.Types, name)
+	}
 }
 
 var protoTemplate = `
-/* tslint:disable */
+/* eslint-disable */
 
 // This file has been generated by https://github.com/horizon-games/protoc-gen-twirp_ts.
 // Do not edit.
 
-{{- if .Imports}}
-{{range .Imports -}}
-{{. | compile}}
-{{end}}
+{{if .Imports -}}
+{{- range .Imports -}}
+{{- . | compile}}
 {{end -}}
+{{- end -}}
 
-{{- if .Services}}
-import {
-  createTwirpRequest,
-  Fetch,
-  throwTwirpError
-} from './twirp'
-{{end}}
+{{- if .Services -}}
+import { createTwirpRequest, Fetch, throwTwirpError } from "{{.RelativeImportBase}}twirp";
+{{end -}}
 
 {{- if .Enums}}
 {{range .Enums -}}
 {{. | compile}}
 {{end -}}
-{{end}}
+{{- end}}
 
 {{- if .Messages}}
-
 {{range .Messages -}}
 {{. | compile}}
 
 {{end -}}
 {{end}}
 
-{{- if .Services}}
-
+{{- if .Services -}}
 // Services
 {{range .Services}}
 {{- . | compile}}
@@ -261,7 +295,7 @@ func compileAndExecute(tpl string, data interface{}) (string, error) {
 		return "", err
 	}
 
-	return strings.TrimSpace(buf.String()), nil
+	return strings.TrimSpace(buf.String()) + "\n", nil
 }
 
 func objectToField(fv fieldValues) string {
@@ -274,21 +308,32 @@ func objectToField(fv fieldValues) string {
 	if fv.IsRepeated {
 		switch t {
 		case "string", "number", "boolean":
-			return fmt.Sprintf("(m['%s']! || []).map((v) => { return %s(v)})", fv.Name, upperCaseFirst(t))
+			return fmt.Sprintf(strings.TrimSpace(`
+(m["%s"]! || []).map(v => {
+        return %s(v);
+      })
+`),
+				fv.Name, upperCaseFirst(t),
+			)
 		}
-		return fmt.Sprintf("(m['%s']! || []).map((v) => { return %s.fromJSON(v) })", fv.Name, t)
+		return fmt.Sprintf(strings.TrimSpace(`
+(m["%s"]! || []).map(v => {
+        return %s.fromJSON(v);
+      })
+`),
+			fv.Name, t)
 	}
 
 	switch t {
 	case "string", "number", "boolean":
-		return fmt.Sprintf("m['%s']!", fv.Name)
+		return fmt.Sprintf(`m["%s"]!`, fv.Name)
 	}
 
 	if fv.IsEnum {
-		return fmt.Sprintf("(<any>%s)[m['%s']!]!", fv.Type, fv.Name)
+		return fmt.Sprintf(`(<any>%s)[m["%s"]!]!`, fv.Type, fv.Name)
 	}
 
-	return fmt.Sprintf("%s.fromJSON(m['%s']!)", t, fv.Name)
+	return fmt.Sprintf(`%s.fromJSON(m["%s"]!)`, t, fv.Name)
 }
 
 func typeToInterface(typeName string) string {
@@ -301,4 +346,23 @@ func typeToJSONInterface(typeName string) string {
 
 func methodName(method string) string {
 	return strings.ToLower(method[0:1]) + method[1:]
+}
+
+type exportValues struct {
+	Exports []string
+}
+
+const exportTemplate = `
+/* eslint-disable */
+
+// This file has been generated by https://github.com/horizon-games/protoc-gen-twirp_ts.
+// Do not edit.
+
+{{range $i, $e := .Exports -}}
+export * from "./{{$e}}";
+{{end -}}
+`
+
+func (ev *exportValues) Compile() (string, error) {
+	return compileAndExecute(exportTemplate, ev)
 }
