@@ -102,9 +102,7 @@ export class {{.Name}} implements {{.Interface}} {
 
   // {{.Field}} ({{.Name}})
   public get {{.Field}}(): {{. | fieldType}} {
-    {{if .IsEnum -}}
-      return (<any>{{. | fieldType}})[this._json.{{.Name}}!]
-    {{- else if .IsRepeated -}}
+    {{if .IsRepeated -}}
       return this._json.{{.Name}} || []
     {{- else -}}
       return this._json.{{.Name}}!
@@ -316,6 +314,17 @@ func objectToField(fv fieldValues) string {
 				fv.Name, upperCaseFirst(t),
 			)
 		}
+
+		if fv.IsEnum {
+			return fmt.Sprintf(strings.TrimSpace(`
+(m["%s"]! || []).map(v => {
+        return (<any>%s)[v];
+      })
+`),
+				fv.Name, fv.Type,
+			)
+		}
+
 		return fmt.Sprintf(strings.TrimSpace(`
 (m["%s"]! || []).map(v => {
         return %s.fromJSON(v);
